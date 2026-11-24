@@ -40,7 +40,7 @@ input,select,textarea,button{touch-action:manipulation}input,select,textarea{max
 .main .section-title h1{color:#fff !important}
 .permission-matrix-wrap{max-height:42vh;overflow:auto;border:1px solid #e5ebef;border-radius:10px}.permission-matrix{min-width:520px}.permission-matrix th,.permission-matrix td{text-align:center;padding:9px}.permission-matrix th:first-child,.permission-matrix td:first-child{text-align:left;position:sticky;left:0;background:#fff;z-index:1}.permission-matrix input{width:17px;height:17px;accent-color:#2675c8}.permission-matrix tr:hover td{background:#f7fbff}.permission-matrix tr:hover td:first-child{background:#f7fbff}</style>
 <!-- v10.1 Local Admin: Supabase removed; local browser storage only -->
-<!-- Shared local login: admin / 123456 -->
+<!-- Shared admin login; password is verified by the Netlify Function. -->
 </head>
 <body>
 <div id="loginScreen" class="login-screen">
@@ -51,7 +51,7 @@ input,select,textarea,button{touch-action:manipulation}input,select,textarea{max
   <div class="field"><label>Mật khẩu</label><input id="loginPass" type="password" placeholder="Nhập mật khẩu" autocomplete="current-password"></div>
   <button class="btn" id="loginButton" onclick="login()">Đăng nhập</button>
   <p style="text-align:center;margin:14px 0 0"><a href="#" onclick="toast('Vui lòng liên hệ chủ sở hữu để được cấp lại mật khẩu.');return false" style="color:#2675c8">Quên mật khẩu?</a></p>
-  <div class="demo" id="authNotice">Tài khoản dùng chung: admin / 123456. Dữ liệu lưu trên trình duyệt hiện tại; không đồng bộ giữa thiết bị.</div>
+  <div class="demo" id="authNotice">Đăng nhập bằng tài khoản quản trị dùng chung. Dữ liệu được lưu tập trung và đồng bộ qua Netlify.</div>
  </div>
 </div>
 <div id="app" class="app">
@@ -272,10 +272,10 @@ async function login(){
  catch(e){console.error(e);htCloudReady=false;htCloudAuthHeader='';toast('Không thể đăng nhập/kết nối kho dữ liệu: '+e.message)}
  finally{if(btn){btn.disabled=false;btn.textContent='Đăng nhập'}}
 }
-function resetPassword(){toast('Tài khoản dùng chung đang sử dụng mật khẩu mặc định admin / 123456.')}
+function resetPassword(){toast('Vui lòng liên hệ chủ sở hữu để được hỗ trợ mật khẩu dùng chung.')}
 function changeOwnPassword(){toast('Phiên bản đăng nhập cục bộ chưa hỗ trợ đổi mật khẩu.')}
 function logout(){htCloudReady=false;htCloudAuthHeader='';clearInterval(htCloudTimer);clearTimeout(htCloudSaveTimer);$('app').style.display='none';$('loginScreen').style.display='grid';$('loginPass').value='';currentUser=null;}
-async function restoreSession(){const notice=$('authNotice');if(notice)notice.textContent='Đăng nhập bằng tài khoản dùng chung admin / 123456. Dữ liệu được lưu tập trung trên Netlify.';}
+async function restoreSession(){const notice=$('authNotice');if(notice)notice.textContent='Đăng nhập bằng tài khoản quản trị dùng chung. Dữ liệu được lưu tập trung trên Netlify.';}
 
 function saveProfile(){currentUser.name=$('profileName').value.trim()||'Admin';currentUser.email=$('profileEmail').value.trim();localStorage.setItem('ht_name',currentUser.name);updateProfileUI();toast('Đã lưu hồ sơ cá nhân.')}
 function showSection(id,el){if(!guardPermission('view',id))return;const section=$(id);if(!section)return;document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));section.classList.add('active');document.querySelectorAll('.nav').forEach(n=>n.classList.remove('active'));const nav=el||document.querySelector(`[data-page=\"${id}\"]`);if(nav)nav.classList.add('active');document.querySelector('.sidebar')?.classList.remove('open');if(id==='tasks')renderCalendar();if(id==='share')renderShares();if(id==='audit')renderAudit();window.scrollTo({top:0,behavior:'smooth'})}
