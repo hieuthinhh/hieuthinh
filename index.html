@@ -181,10 +181,11 @@ async function htCloudPush(){
   htCloudStatus('Đã đồng bộ dữ liệu · '+new Date().toLocaleTimeString('vi-VN'));
  }catch(e){if(e.status===409&&e.payload?.record){htCloudApply(e.payload.record,'Máy chủ có dữ liệu mới hơn – đã tải dữ liệu mới nhất');toast('Có cập nhật từ thiết bị khác. Hệ thống đã tải dữ liệu mới nhất để tránh ghi đè.')}else{console.error(e);htCloudStatus('Lỗi đồng bộ · '+e.message);}}
 }
-function htCloudSchedulePush(){if(!htCloudReady||htCloudHydrating)return;clearTimeout(htCloudSaveTimer);htCloudSaveTimer=setTimeout(htCloudPush,700)}
-async function htCloudConnect(password){
+function htCloudSchedulePush(){if(!htCloudReady||htCloudHydrating)return;clearTimeout(htCloudSaveTimer);htCloudSaveTimer=setTimeout(()=>{htCloudPush()},350)}
+async function htCloudConnect(passwordOrHeader,reuseAuthHeader=false){
  htCloudReady=false;
- htCloudAuthHeader='Basic '+btoa(HT_SHARED_ADMIN_USER+':'+password);
+ htCloudAuthHeader=reuseAuthHeader?String(passwordOrHeader||''):'Basic '+btoa(HT_SHARED_ADMIN_USER+':'+passwordOrHeader);
+ if(!htCloudAuthHeader.startsWith('Basic '))throw new Error('Phiên đăng nhập không hợp lệ. Vui lòng đăng nhập lại.');
  const result=await htCloudRequest('GET');
  if(result.record?.data){
   htCloudApply(result.record,'Đã tải dữ liệu ERP từ Netlify');
@@ -298,6 +299,8 @@ async function login(){
  if(notice)notice.textContent='Đang kết nối kho dữ liệu tập trung trên Netlify...';
  try{
   await htCloudConnect(password);
+  // Giữ phiên trong tab hiện tại để F5/tải lại trang không làm đăng xuất.
+  sessionStorage.setItem('ht_erp_admin_auth_v1',htCloudAuthHeader);
   showApp({id:'shared-admin',name:'Admin',role:'Quản trị chung',isOwner:true,username:'admin',email:'admin@hieuthinh.local',authMode:'netlify',permissions:{}});
   if(notice)notice.textContent='Đăng nhập thành công · Dữ liệu đang đồng bộ qua Netlify.';
  }catch(e){
@@ -310,8 +313,31 @@ async function login(){
 }
 function resetPassword(){toast('Vui lòng liên hệ chủ sở hữu để được hỗ trợ mật khẩu dùng chung.')}
 function changeOwnPassword(){toast('Phiên bản đăng nhập cục bộ chưa hỗ trợ đổi mật khẩu.')}
-function logout(){htCloudReady=false;htCloudAuthHeader='';clearInterval(htCloudTimer);clearTimeout(htCloudSaveTimer);$('app').style.display='none';$('loginScreen').style.display='grid';$('loginPass').value='';currentUser=null;}
-async function restoreSession(){const notice=$('authNotice');if(notice)notice.textContent='Đăng nhập bằng tài khoản admin dùng chung. Hệ thống xác thực và tải dữ liệu tập trung qua Netlify.';}
+function logout(){
+ // Đẩy các thay đổi đang chờ trước khi kết thúc phiên; xóa thông tin xác thực của tab.
+ if(htCloudReady){clearTimeout(htCloudSaveTimer);htCloudPush().catch(()=>{});}
+ htCloudReady=false;htCloudAuthHeader='';clearInterval(htCloudTimer);clearTimeout(htCloudSaveTimer);
+ try{sessionStorage.removeItem('ht_erp_admin_auth_v1')}catch(e){}
+ $('app').style.display='none';$('loginScreen').style.display='grid';$('loginPass').value='';currentUser=null;
+}
+async function restoreSession(){
+ const notice=$('authNotice');
+ if(notice)notice.textContent='Đang kiểm tra phiên đăng nhập...';
+ let savedHeader='';try{savedHeader=sessionStorage.getItem('ht_erp_admin_auth_v1')||''}catch(e){}
+ if(!savedHeader){if(notice)notice.textContent='Đăng nhập bằng tài khoản admin dùng chung. Hệ thống xác thực và tải dữ liệu tập trung qua Netlify.';return}
+ try{
+  await htCloudConnect(savedHeader,true);
+  showApp({id:'shared-admin',name:'Admin',role:'Quản trị chung',isOwner:true,username:'admin',email:'admin@hieuthinh.local',authMode:'netlify',permissions:{}});
+  // Mỗi lần tải lại trang luôn trở về Dashboard, không khôi phục phân hệ cũ.
+  showSection('dashboard',document.querySelector('[data-page="dashboard"]'));
+  if(notice)notice.textContent='Đã khôi phục phiên Admin · dữ liệu mới nhất đã được tải.';
+ }catch(e){
+  console.warn('Không thể khôi phục phiên Admin:',e);
+  try{sessionStorage.removeItem('ht_erp_admin_auth_v1')}catch(_){ }
+  htCloudReady=false;htCloudAuthHeader='';clearInterval(htCloudTimer);
+  if(notice)notice.textContent='Phiên đăng nhập đã hết hạn hoặc không kết nối được máy chủ. Vui lòng đăng nhập lại.';
+ }
+}
 
 function saveProfile(){currentUser.name=$('profileName').value.trim()||'Admin';currentUser.email=$('profileEmail').value.trim();localStorage.setItem('ht_name',currentUser.name);updateProfileUI();toast('Đã lưu hồ sơ cá nhân.')}
 function showSection(id,el){if(!guardPermission('view',id))return;const section=$(id);if(!section)return;document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));section.classList.add('active');document.querySelectorAll('.nav').forEach(n=>n.classList.remove('active'));const nav=el||document.querySelector(`[data-page=\"${id}\"]`);if(nav)nav.classList.add('active');document.querySelector('.sidebar')?.classList.remove('open');if(id==='tasks')renderCalendar();if(id==='share')renderShares();if(id==='audit')renderAudit();window.scrollTo({top:0,behavior:'smooth'})}
@@ -461,7 +487,22 @@ const HT_EXCEL_IMPORT_DATA={"orders":[{"id":"HT-EX-001","date":"2026-11-20","cus
 addExcelImportControls();
 restoreSession();
 if(DATA_SAFETY.blocked)showDataSafetyNotice();
-document.addEventListener('keydown',e=>{if(e.key==='Enter'&&$('loginScreen').style.display!=='none')login();if(e.key==='Escape')closeModal();if(e.key==='F5'&&$('app').style.display!=='none'){e.preventDefault();goHome();toast('Đã làm mới trang chủ.');}});
+document.addEventListener('keydown',e=>{
+ if(e.key==='Enter'&&$('loginScreen').style.display!=='none')login();
+ if(e.key==='Escape')closeModal();
+ if((e.key==='F5'||((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='r'))&&$('app').style.display!=='none'){
+  e.preventDefault();goHome();toast('Đã trở về trang chủ Dashboard. Phiên đăng nhập vẫn được giữ.');
+ }
+});
+// Khi người dùng chuyển tab/mạng trở lại, đẩy thay đổi đang chờ và thử đồng bộ lại.
+window.addEventListener('online',()=>{if(htCloudReady)htCloudPush()});
+window.addEventListener('focus',()=>{if(htCloudReady)htCloudPush()});
+// Lưu bản cục bộ đã có trong saveDB; pagehide chỉ cố gắng gửi phần đồng bộ còn chờ.
+window.addEventListener('pagehide',()=>{
+ if(!htCloudReady||htCloudHydrating)return;
+ clearTimeout(htCloudSaveTimer);
+ try{fetch(HT_SYNC_ENDPOINT,{method:'POST',headers:{'Authorization':htCloudAuthHeader,'Content-Type':'application/json'},body:JSON.stringify({data:db,updatedAt:db._meta?.updatedAt||new Date().toISOString()}),keepalive:true}).catch(()=>{});}catch(e){}
+});
 
 </script>
 </body></html>
