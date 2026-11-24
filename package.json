@@ -1,0 +1,10 @@
+
+{
+  "name": "hieu-thinh-erp",
+  "version": "10.2.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@netlify/blobs": "^10.5.0"
+  }
+}

@@ -40,7 +40,7 @@ input,select,textarea,button{touch-action:manipulation}input,select,textarea{max
 .main .section-title h1{color:#fff !important}
 .permission-matrix-wrap{max-height:42vh;overflow:auto;border:1px solid #e5ebef;border-radius:10px}.permission-matrix{min-width:520px}.permission-matrix th,.permission-matrix td{text-align:center;padding:9px}.permission-matrix th:first-child,.permission-matrix td:first-child{text-align:left;position:sticky;left:0;background:#fff;z-index:1}.permission-matrix input{width:17px;height:17px;accent-color:#2675c8}.permission-matrix tr:hover td{background:#f7fbff}.permission-matrix tr:hover td:first-child{background:#f7fbff}</style>
 <!-- v10.1 Local Admin: Supabase removed; local browser storage only -->
-<!-- Shared local login: admin / 123456 -->
+<!-- Shared admin login; password is verified by the Netlify Function. -->
 </head>
 <body>
 <div id="loginScreen" class="login-screen">
@@ -51,7 +51,7 @@ input,select,textarea,button{touch-action:manipulation}input,select,textarea{max
   <div class="field"><label>Mật khẩu</label><input id="loginPass" type="password" placeholder="Nhập mật khẩu" autocomplete="current-password"></div>
   <button class="btn" id="loginButton" onclick="login()">Đăng nhập</button>
   <p style="text-align:center;margin:14px 0 0"><a href="#" onclick="toast('Vui lòng liên hệ chủ sở hữu để được cấp lại mật khẩu.');return false" style="color:#2675c8">Quên mật khẩu?</a></p>
-  <div class="demo" id="authNotice">Tài khoản dùng chung: admin / 123456. Dữ liệu lưu trên trình duyệt hiện tại; không đồng bộ giữa thiết bị.</div>
+  <div class="demo" id="authNotice">Đăng nhập bằng tài khoản quản trị dùng chung. Dữ liệu được lưu tập trung và đồng bộ qua Netlify.</div>
  </div>
 </div>
 <div id="app" class="app">
@@ -144,10 +144,70 @@ input,select,textarea,button{touch-action:manipulation}input,select,textarea{max
 <div class="modal-backdrop" id="modalBackdrop" onclick="if(event.target===this)closeModal()"><div class="modal"><div class="modal-head"><h2 id="modalTitle">Thông tin</h2><button class="close" onclick="closeModal()">×</button></div><div id="modalContent"></div><div class="modal-actions" id="modalActions"></div></div></div>
 <div class="toast" id="toast"></div>
 <script>
-// Shared local login mode: no Supabase dependency.
-// IMPORTANT: data is stored in this browser only and is not synchronized across devices.
-const HT_SHARED_ADMIN_USER='admin', HT_SHARED_ADMIN_PASSWORD='123456';
-let htCloudReady=false, htCloudHydrating=false;
+// Shared ERP login with Netlify-hosted central storage.
+const HT_SHARED_ADMIN_USER='admin';
+const HT_SYNC_ENDPOINT='/.netlify/functions/erp-data';
+let htCloudReady=false, htCloudHydrating=false, htCloudTimer=null, htCloudSaveTimer=null, htCloudAuthHeader='', htCloudLastRemoteAt='';
+function htCloudStatus(message){const a=$('autosaveState');if(a)a.textContent=message}
+async function htCloudRequest(method='GET',body=null){
+ const controller=new AbortController();
+ const timeoutId=setTimeout(()=>controller.abort(),15000);
+ let res,payload;
+ try{
+  res=await fetch(HT_SYNC_ENDPOINT,{method,headers:{'Authorization':htCloudAuthHeader,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{}),signal:controller.signal});
+  payload=await res.json().catch(()=>({error:'Máy chủ không trả về dữ liệu JSON. Hãy kiểm tra Netlify Function erp-data.'}));
+ }catch(err){
+  if(err.name==='AbortError')throw new Error('Máy chủ phản hồi quá lâu (15 giây). Vui lòng thử lại.');
+  throw new Error('Không kết nối được Netlify Function erp-data. Kiểm tra deploy và đường dẫn /.netlify/functions/erp-data.');
+ }finally{clearTimeout(timeoutId)}
+ if(!res.ok){const e=new Error(payload.error||('Máy chủ trả về lỗi HTTP '+res.status+'.'));e.status=res.status;e.payload=payload;throw e}
+ return payload;
+}
+function htCloudApply(record,label='Đã nhận dữ liệu từ máy chủ'){
+ if(!record?.data)return false;
+ const raw=localStorage.getItem(DB_KEY);
+ if(raw&&!backupCurrentBeforeReplace(raw,'before-netlify-sync'))throw new Error('Không tạo được bản sao lưu dữ liệu trên thiết bị. Hệ thống đã dừng tải dữ liệu Cloud để tránh mất dữ liệu hiện có.');
+ const nextDB=normalizeDB(record.data);
+ nextDB._meta={...(nextDB._meta||{}),version:DB_VERSION,updatedAt:record.updatedAt||new Date().toISOString()};
+ const serialized=JSON.stringify(nextDB);
+ htCloudHydrating=true;
+ try{localStorage.setItem(DB_KEY,serialized);db=nextDB;htCloudLastRemoteAt=record.updatedAt||'';refreshAll();htCloudStatus(label);return true}
+ finally{htCloudHydrating=false}
+}
+async function htCloudPush(){
+ if(!htCloudReady||htCloudHydrating)return;
+ try{const result=await htCloudRequest('POST',{data:db,updatedAt:db._meta?.updatedAt||new Date().toISOString()});
+  if(result.record?.updatedAt){db._meta={...(db._meta||{}),updatedAt:result.record.updatedAt};localStorage.setItem(DB_KEY,JSON.stringify(db));htCloudLastRemoteAt=result.record.updatedAt}
+  htCloudStatus('Đã đồng bộ dữ liệu · '+new Date().toLocaleTimeString('vi-VN'));
+ }catch(e){if(e.status===409&&e.payload?.record){htCloudApply(e.payload.record,'Máy chủ có dữ liệu mới hơn – đã tải dữ liệu mới nhất');toast('Có cập nhật từ thiết bị khác. Hệ thống đã tải dữ liệu mới nhất để tránh ghi đè.')}else{console.error(e);htCloudStatus('Lỗi đồng bộ · '+e.message);}}
+}
+function htCloudSchedulePush(){if(!htCloudReady||htCloudHydrating)return;clearTimeout(htCloudSaveTimer);htCloudSaveTimer=setTimeout(htCloudPush,700)}
+async function htCloudConnect(password){
+ htCloudReady=false;
+ htCloudAuthHeader='Basic '+btoa(HT_SHARED_ADMIN_USER+':'+password);
+ const result=await htCloudRequest('GET');
+ if(result.record?.data){
+  htCloudApply(result.record,'Đã tải dữ liệu ERP từ Netlify');
+ }else{
+  // Chỉ khởi tạo Cloud khi máy chủ xác nhận kho đang trống; dữ liệu cục bộ được giữ lại.
+  const hasLocalData=DB_TABLES.some(k=>Array.isArray(db[k])&&db[k].length>0);
+  htCloudReady=true;
+  if(hasLocalData){await htCloudPush();htCloudStatus('Đã khởi tạo kho dữ liệu ERP trên Netlify')}
+  else{htCloudStatus('Kho Cloud đang trống · cần khôi phục backup để khởi tạo dữ liệu chung')}
+ }
+ htCloudReady=true;
+ clearInterval(htCloudTimer);
+ let polling=false;
+ htCloudTimer=setInterval(async()=>{
+  if(!htCloudReady||document.hidden||polling)return;
+  polling=true;
+  try{
+   const latest=await htCloudRequest('GET');
+   if(latest.record?.data&&latest.record.updatedAt!==htCloudLastRemoteAt){htCloudApply(latest.record,'Đã nhận cập nhật từ thiết bị khác · '+new Date().toLocaleTimeString('vi-VN'))}
+  }catch(e){htCloudStatus('Mất kết nối đồng bộ · '+e.message)}
+  finally{polling=false}
+ },5000);
+}
 
 const $=id=>document.getElementById(id), money=n=>new Intl.NumberFormat('vi-VN',{style:'currency',currency:'VND',maximumFractionDigits:0}).format(Number(n)||0), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const DB_KEY='ht_erp_db', DB_VERSION=5, AUDIT_KEY='ht_erp_audit_snapshot_v1', AUTO_BACKUP_KEY='ht_erp_auto_backups_v2', MIGRATION_BACKUP_KEY='ht_erp_pre_migration_backup_v1', RECOVERY_RAW_KEY='ht_erp_recovery_raw_v1';
@@ -219,7 +279,7 @@ function exportRecoveryRaw(){const raw=DATA_SAFETY.raw||localStorage.getItem(REC
 function confirmSafeMigration(){try{const raw=localStorage.getItem(DB_KEY);if(!raw)throw new Error('Không tìm thấy dữ liệu hiện tại');localStorage.setItem(MIGRATION_BACKUP_KEY,JSON.stringify({app:'HIEU_THINH_ERP',backupType:'manual-pre-migration',fromVersion:Number(db._meta?.version||1),toVersion:DB_VERSION,createdAt:new Date().toISOString(),rawData:raw}));const migrated=normalizeDB(JSON.parse(raw));migrated._meta={...(migrated._meta||{}),version:DB_VERSION,migratedFrom:Number(migrated._meta?.version||1),migratedAt:new Date().toISOString()};localStorage.setItem(DB_KEY,JSON.stringify(migrated));db=migrated;DATA_SAFETY={blocked:false,reason:'',pendingMigration:false,raw:null};$('dataSafetyNotice')?.remove();refreshAll();toast('Đã sao lưu và nâng cấp dữ liệu an toàn.')}catch(e){toast('Chưa thể nâng cấp: '+e.message)}}
 function auditChanges(before,after){const keys=DB_TABLES.filter(k=>k!=='auditLog');const events=[];keys.forEach(table=>{const a=new Map((before[table]||[]).map(x=>[String(x.id),x])),b=new Map((after[table]||[]).map(x=>[String(x.id),x]));b.forEach((v,id)=>{const old=a.get(id);if(!old)events.push({id:nextId('LOG',after.auditLog.concat(events)),time:new Date().toISOString(),user:currentUser?.email||'local-user',action:'CREATE',table,recordId:id,summary:`Tạo ${table} · ${id}`});else if(JSON.stringify(old)!==JSON.stringify(v)){const changed=Array.from(new Set([...Object.keys(old||{}),...Object.keys(v||{})])).filter(k=>JSON.stringify(old?.[k])!==JSON.stringify(v?.[k]));events.push({id:nextId('LOG',after.auditLog.concat(events)),time:new Date().toISOString(),user:currentUser?.email||'local-user',action:'UPDATE',table,recordId:id,summary:`Cập nhật ${table} · ${id} · Trường: ${changed.join(', ')}`})}});a.forEach((v,id)=>{if(!b.has(id))events.push({id:nextId('LOG',after.auditLog.concat(events)),time:new Date().toISOString(),user:currentUser?.email||'local-user',action:'DELETE',table,recordId:id,summary:`Xóa ${table} · ${id}`})})});after.auditLog=(after.auditLog||[]).concat(events).slice(-1000)}
 function autoBackupLocal(previousRaw,force=false,label='daily'){try{if(!previousRaw)return false;let arr=JSON.parse(localStorage.getItem(AUTO_BACKUP_KEY)||'[]');const today=todayLocal();if(!force&&label==='daily'&&arr.some(x=>x.date===today&&x.label==='daily'))return true;arr.unshift({date:today,createdAt:new Date().toISOString(),label,data:JSON.parse(previousRaw)});arr=arr.slice(0,10);localStorage.setItem(AUTO_BACKUP_KEY,JSON.stringify(arr));return true}catch(e){console.warn('Không tạo được bản sao lưu tự động trong trình duyệt',e);return false}}
-function saveDB(){if(DATA_SAFETY.blocked){toast('Hệ thống đang khóa ghi dữ liệu để bảo vệ dữ liệu gốc. Vui lòng hoàn tất sao lưu/khôi phục trước.');return false}try{const previousRaw=localStorage.getItem(DB_KEY);try{const previous=previousRaw?JSON.parse(previousRaw):emptyDB();auditChanges(previous,db)}catch(e){console.warn('Không tạo được nhật ký thay đổi',e)}db._meta={...(db._meta||{}),version:DB_VERSION,updatedAt:new Date().toISOString()};const serialized=JSON.stringify(db);if(previousRaw&&!autoBackupLocal(previousRaw,false,'daily')){throw new Error('Không tạo được bản sao lưu dự phòng trước khi ghi')};localStorage.setItem(DB_KEY,serialized);localStorage.setItem('ht_erp_saved_at',db._meta.updatedAt);localStorage.setItem(AUDIT_KEY,JSON.stringify({lastSavedAt:db._meta.updatedAt}));const a=$('autosaveState');if(a)a.textContent='Đã lưu dữ liệu · '+new Date().toLocaleTimeString('vi-VN');refreshAll();return true}catch(e){console.error(e);const a=$('autosaveState');if(a)a.textContent='Lỗi lưu dữ liệu';toast('Không thể lưu dữ liệu an toàn: '+(e.message||'Bộ nhớ trình duyệt có thể đã đầy')+'. Hãy xuất bản sao lưu JSON và kiểm tra dung lượng.');return false}}
+function saveDB(){if(DATA_SAFETY.blocked){toast('Hệ thống đang khóa ghi dữ liệu để bảo vệ dữ liệu gốc. Vui lòng hoàn tất sao lưu/khôi phục trước.');return false}try{const previousRaw=localStorage.getItem(DB_KEY);try{const previous=previousRaw?JSON.parse(previousRaw):emptyDB();auditChanges(previous,db)}catch(e){console.warn('Không tạo được nhật ký thay đổi',e)}db._meta={...(db._meta||{}),version:DB_VERSION,updatedAt:new Date().toISOString()};const serialized=JSON.stringify(db);if(previousRaw&&!autoBackupLocal(previousRaw,false,'daily')){throw new Error('Không tạo được bản sao lưu dự phòng trước khi ghi')};localStorage.setItem(DB_KEY,serialized);localStorage.setItem('ht_erp_saved_at',db._meta.updatedAt);localStorage.setItem(AUDIT_KEY,JSON.stringify({lastSavedAt:db._meta.updatedAt}));htCloudSchedulePush();const a=$('autosaveState');if(a)a.textContent='Đã lưu dữ liệu · '+new Date().toLocaleTimeString('vi-VN');refreshAll();return true}catch(e){console.error(e);const a=$('autosaveState');if(a)a.textContent='Lỗi lưu dữ liệu';toast('Không thể lưu dữ liệu an toàn: '+(e.message||'Bộ nhớ trình duyệt có thể đã đầy')+'. Hãy xuất bản sao lưu JSON và kiểm tra dung lượng.');return false}}
 // Tự lưu bản nháp các trường đang nhập; hỗ trợ khôi phục khi vô tình tải lại trang.
 const DRAFT_KEY='ht_erp_form_draft_v1';
 function saveCurrentDraft(){const modal=$('modalBackdrop');if(!modal?.classList.contains('show'))return;const fields=[...$('modalContent').querySelectorAll('input,select,textarea')].map((el,i)=>({i,id:el.id||'',type:el.type||el.tagName,value:el.type==='checkbox'?el.checked:el.value}));const draft={title:$('modalTitle').textContent,content:$('modalContent').innerHTML,actions:$('modalActions').innerHTML,fields,savedAt:new Date().toISOString()};try{localStorage.setItem(DRAFT_KEY,JSON.stringify(draft));const a=$('autosaveState');if(a)a.textContent='Đã tự lưu bản nháp';}catch(e){}}
@@ -229,18 +289,29 @@ function goHome(){if(!$('app').style.display||$('app').style.display==='none')re
 
 function showApp(user,restoreForm=false){currentUser=user;$('loginScreen').style.display='none';$('app').style.display='block';updateProfileUI();applyPermissionVisibility();showSection(canAccessModule('dashboard')?'dashboard':(HT_MODULES.find(([k])=>canAccessModule(k))?.[0]||'dashboard'),document.querySelector(`[data-page="${canAccessModule('dashboard')?'dashboard':(HT_MODULES.find(([k])=>canAccessModule(k))?.[0]||'dashboard')}"]`));refreshAll();if(restoreForm)restoreDraft();window.scrollTo(0,0)}
 function manageOwnerLogin(){if(!currentUser?.isOwner){toast('Chỉ chủ sở hữu mới được điều chỉnh tài khoản đăng nhập.');return}changeOwnPassword()}
-function login(){
- const loginName=$('loginUser').value.trim().toLowerCase();
- const password=$('loginPass').value;
- if(loginName!==HT_SHARED_ADMIN_USER||password!==HT_SHARED_ADMIN_PASSWORD){toast('Tên đăng nhập hoặc mật khẩu không chính xác.');return}
- const btn=$('loginButton');if(btn){btn.disabled=true;btn.textContent='Đang đăng nhập...'}
- try{showApp({id:'shared-admin',name:'Admin',role:'Quản trị chung',isOwner:true,username:'admin',email:'admin@hieuthinh.local',authMode:'local',permissions:{}});$('authNotice').textContent='Đã đăng nhập bằng tài khoản dùng chung.';}
- finally{if(btn){btn.disabled=false;btn.textContent='Đăng nhập'}}
+async function login(){
+ const loginName=$('loginUser').value.trim().toLowerCase(),password=$('loginPass').value;
+ const notice=$('authNotice');
+ if(loginName!==HT_SHARED_ADMIN_USER||!password){const msg='Vui lòng nhập đúng tài khoản admin và mật khẩu.';if(notice)notice.textContent=msg;toast(msg);return}
+ const btn=$('loginButton');
+ if(btn){btn.disabled=true;btn.textContent='Đang xác thực và tải dữ liệu...'}
+ if(notice)notice.textContent='Đang kết nối kho dữ liệu tập trung trên Netlify...';
+ try{
+  await htCloudConnect(password);
+  showApp({id:'shared-admin',name:'Admin',role:'Quản trị chung',isOwner:true,username:'admin',email:'admin@hieuthinh.local',authMode:'netlify',permissions:{}});
+  if(notice)notice.textContent='Đăng nhập thành công · Dữ liệu đang đồng bộ qua Netlify.';
+ }catch(e){
+  console.error('ERP login/cloud connection failed:',e);
+  htCloudReady=false;htCloudAuthHeader='';clearInterval(htCloudTimer);
+  const msg='Không thể đăng nhập hoặc kết nối dữ liệu: '+(e.message||'Lỗi không xác định');
+  if(notice)notice.textContent=msg;
+  toast(msg);
+ }finally{if(btn){btn.disabled=false;btn.textContent='Đăng nhập'}}
 }
-function resetPassword(){toast('Tài khoản dùng chung đang sử dụng mật khẩu mặc định admin / 123456.')}
+function resetPassword(){toast('Vui lòng liên hệ chủ sở hữu để được hỗ trợ mật khẩu dùng chung.')}
 function changeOwnPassword(){toast('Phiên bản đăng nhập cục bộ chưa hỗ trợ đổi mật khẩu.')}
-function logout(){$('app').style.display='none';$('loginScreen').style.display='grid';$('loginPass').value='';currentUser=null;}
-async function restoreSession(){const notice=$('authNotice');if(notice)notice.textContent='Tài khoản dùng chung: admin / 123456.';}
+function logout(){htCloudReady=false;htCloudAuthHeader='';clearInterval(htCloudTimer);clearTimeout(htCloudSaveTimer);$('app').style.display='none';$('loginScreen').style.display='grid';$('loginPass').value='';currentUser=null;}
+async function restoreSession(){const notice=$('authNotice');if(notice)notice.textContent='Đăng nhập bằng tài khoản admin dùng chung. Hệ thống xác thực và tải dữ liệu tập trung qua Netlify.';}
 
 function saveProfile(){currentUser.name=$('profileName').value.trim()||'Admin';currentUser.email=$('profileEmail').value.trim();localStorage.setItem('ht_name',currentUser.name);updateProfileUI();toast('Đã lưu hồ sơ cá nhân.')}
 function showSection(id,el){if(!guardPermission('view',id))return;const section=$(id);if(!section)return;document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));section.classList.add('active');document.querySelectorAll('.nav').forEach(n=>n.classList.remove('active'));const nav=el||document.querySelector(`[data-page=\"${id}\"]`);if(nav)nav.classList.add('active');document.querySelector('.sidebar')?.classList.remove('open');if(id==='tasks')renderCalendar();if(id==='share')renderShares();if(id==='audit')renderAudit();window.scrollTo({top:0,behavior:'smooth'})}
@@ -356,7 +427,7 @@ const IMPORT_SECTION_MAP={orders:'orders',products:'products',customers:'custome
 function addExcelImportControls(){document.querySelectorAll('.section[id]').forEach(sec=>{const key=IMPORT_SECTION_MAP[sec.id];if(!key||sec.querySelector('.section-excel-import'))return;const title=sec.querySelector('.section-title');if(!title)return;const wrap=document.createElement('span');wrap.className='section-excel-import';wrap.style.cssText='display:inline-flex;gap:6px;align-items:center;margin-left:8px';const input=document.createElement('input');input.type='file';input.accept='.xlsx,.xls,.csv';input.hidden=true;input.addEventListener('change',e=>importExcelTarget(e,key));const btn=document.createElement('button');btn.className='btn secondary';btn.type='button';btn.textContent='↑ Nhập Excel';btn.title='Nhập dữ liệu từ sheet đầu tiên của file Excel vào phân hệ này';btn.onclick=()=>input.click();wrap.append(input,btn);title.appendChild(wrap)})}
 
 function exportBackup(){if(DATA_SAFETY.blocked&&!DATA_SAFETY.pendingMigration&&DATA_SAFETY.raw){exportRecoveryRaw();return}const payload={app:'HIEU_THINH_ERP',version:DB_VERSION,exportedAt:new Date().toISOString(),data:db,localAutoBackups:JSON.parse(localStorage.getItem(AUTO_BACKUP_KEY)||'[]')};const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});downloadBlob(blob,`HieuThinh_ERP_Backup_v${DB_VERSION}_${todayLocal()}.json`);toast('Đã tạo file sao lưu JSON gồm dữ liệu hiện tại và các bản sao lưu cục bộ.')}
-function importBackup(e){const file=e.target.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=ev=>{try{const payload=JSON.parse(ev.target.result);const incoming=payload.data||payload;if(!incoming||!DB_TABLES.some(k=>Array.isArray(incoming[k])))throw new Error('Cấu trúc backup không hợp lệ');if(!confirm('Khôi phục backup sẽ thay thế dữ liệu hiện tại. Hệ thống sẽ tự tạo bản sao dữ liệu hiện tại trước khi khôi phục. Bạn có muốn tiếp tục?'))return;const current=localStorage.getItem(DB_KEY);if(current&&!backupCurrentBeforeReplace(current,'before-import-restore'))throw new Error('Không tạo được bản sao dữ liệu hiện tại');const restored=normalizeDB(incoming);restored._meta={...(restored._meta||{}),version:DB_VERSION,restoredAt:new Date().toISOString()};localStorage.setItem(DB_KEY,JSON.stringify(restored));if(Array.isArray(payload.localAutoBackups)){const currentBackups=JSON.parse(localStorage.getItem(AUTO_BACKUP_KEY)||'[]');const combined=[...currentBackups,...payload.localAutoBackups];const seen=new Set();const deduped=combined.filter(x=>{const k=String(x.createdAt||'')+'|'+String(x.label||'')+'|'+String(x.date||'');if(seen.has(k))return false;seen.add(k);return true}).slice(0,10);localStorage.setItem(AUTO_BACKUP_KEY,JSON.stringify(deduped))}db=restored;DATA_SAFETY={blocked:false,reason:'',pendingMigration:false,raw:null};$('dataSafetyNotice')?.remove();refreshAll();toast('Đã khôi phục dữ liệu. Bản dữ liệu trước khôi phục vẫn được giữ trong backup cục bộ.')}catch(err){toast('Không thể khôi phục: '+(err.message||'File không hợp lệ hoặc bị lỗi.'))}finally{e.target.value=''}};reader.readAsText(file)}
+function importBackup(e){const file=e.target.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=ev=>{try{const payload=JSON.parse(ev.target.result);const incoming=payload.data||payload;if(!incoming||!DB_TABLES.some(k=>Array.isArray(incoming[k])))throw new Error('Cấu trúc backup không hợp lệ');if(!confirm('Khôi phục backup sẽ thay thế dữ liệu hiện tại. Hệ thống sẽ tự tạo bản sao dữ liệu hiện tại trước khi khôi phục. Bạn có muốn tiếp tục?'))return;const current=localStorage.getItem(DB_KEY);if(current&&!backupCurrentBeforeReplace(current,'before-import-restore'))throw new Error('Không tạo được bản sao dữ liệu hiện tại');const restored=normalizeDB(incoming);restored._meta={...(restored._meta||{}),version:DB_VERSION,restoredAt:new Date().toISOString()};localStorage.setItem(DB_KEY,JSON.stringify(restored));if(Array.isArray(payload.localAutoBackups)){const currentBackups=JSON.parse(localStorage.getItem(AUTO_BACKUP_KEY)||'[]');const combined=[...currentBackups,...payload.localAutoBackups];const seen=new Set();const deduped=combined.filter(x=>{const k=String(x.createdAt||'')+'|'+String(x.label||'')+'|'+String(x.date||'');if(seen.has(k))return false;seen.add(k);return true}).slice(0,10);localStorage.setItem(AUTO_BACKUP_KEY,JSON.stringify(deduped))}db=restored;DATA_SAFETY={blocked:false,reason:'',pendingMigration:false,raw:null};$('dataSafetyNotice')?.remove();saveDB();refreshAll();toast(htCloudReady?'Đã khôi phục backup và gửi dữ liệu lên kho Netlify.':'Đã khôi phục dữ liệu cục bộ. Bản dữ liệu trước khôi phục vẫn được giữ trong backup.')}catch(err){toast('Không thể khôi phục: '+(err.message||'File không hợp lệ hoặc bị lỗi.'))}finally{e.target.value=''}};reader.readAsText(file)}
 function downloadBlob(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}
 
 function globalSearch(q){const term=String(q||'').trim().toLowerCase();if(!term)return;const configs=[['orders','orders',['id','customer','item'],'orderFilter',renderOrders],['products','products',['id','name','category'],'productFilter',renderProducts],['customers','customers',['id','name','email','phone'],'customerFilter',renderCustomers],['suppliers','suppliers',['id','name','email','phone','tax'],'supplierFilter',renderSuppliers],['tasks','tasks',['id','title','orderId'],'',renderCalendar],['quotes','quotes',['id','item','supplier'],'quoteFilter',renderQuotes],['finalquotes','finalQuotes',['id','customer','quoteId'],'finalFilter',renderFinalQuotes],['invoices','invoices',['id','number','partner'],'invoiceFilter',renderInvoices],['contracts','contracts',['id','number','partner'],'contractFilter',renderContracts],['payments','payments',['id','partner','link','note'],'paymentFilter',renderPayments]];for(const [section,key,fields,inputId,render] of configs){const found=(db[key]||[]).some(row=>fields.some(f=>String(row[f]??'').toLowerCase().includes(term)));if(found){showSection(section,document.querySelector(`[data-page=${section}]`));if(inputId){$(inputId).value=q;render()}else render();return}}toast('Không tìm thấy dữ liệu phù hợp.')}
