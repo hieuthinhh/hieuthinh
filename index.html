@@ -150,15 +150,29 @@ const HT_SYNC_ENDPOINT='/.netlify/functions/erp-data';
 let htCloudReady=false, htCloudHydrating=false, htCloudTimer=null, htCloudSaveTimer=null, htCloudAuthHeader='', htCloudLastRemoteAt='';
 function htCloudStatus(message){const a=$('autosaveState');if(a)a.textContent=message}
 async function htCloudRequest(method='GET',body=null){
- const res=await fetch(HT_SYNC_ENDPOINT,{method,headers:{'Authorization':htCloudAuthHeader,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
- const payload=await res.json().catch(()=>({error:'Phản hồi máy chủ không hợp lệ.'}));
- if(!res.ok){const e=new Error(payload.error||'Lỗi kết nối máy chủ.');e.status=res.status;e.payload=payload;throw e}return payload;
+ const controller=new AbortController();
+ const timeoutId=setTimeout(()=>controller.abort(),15000);
+ let res,payload;
+ try{
+  res=await fetch(HT_SYNC_ENDPOINT,{method,headers:{'Authorization':htCloudAuthHeader,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{}),signal:controller.signal});
+  payload=await res.json().catch(()=>({error:'Máy chủ không trả về dữ liệu JSON. Hãy kiểm tra Netlify Function erp-data.'}));
+ }catch(err){
+  if(err.name==='AbortError')throw new Error('Máy chủ phản hồi quá lâu (15 giây). Vui lòng thử lại.');
+  throw new Error('Không kết nối được Netlify Function erp-data. Kiểm tra deploy và đường dẫn /.netlify/functions/erp-data.');
+ }finally{clearTimeout(timeoutId)}
+ if(!res.ok){const e=new Error(payload.error||('Máy chủ trả về lỗi HTTP '+res.status+'.'));e.status=res.status;e.payload=payload;throw e}
+ return payload;
 }
 function htCloudApply(record,label='Đã nhận dữ liệu từ máy chủ'){
- if(!record?.data)return;
- const raw=localStorage.getItem(DB_KEY);if(raw)backupCurrentBeforeReplace(raw,'before-netlify-sync');
+ if(!record?.data)return false;
+ const raw=localStorage.getItem(DB_KEY);
+ if(raw&&!backupCurrentBeforeReplace(raw,'before-netlify-sync'))throw new Error('Không tạo được bản sao lưu dữ liệu trên thiết bị. Hệ thống đã dừng tải dữ liệu Cloud để tránh mất dữ liệu hiện có.');
+ const nextDB=normalizeDB(record.data);
+ nextDB._meta={...(nextDB._meta||{}),version:DB_VERSION,updatedAt:record.updatedAt||new Date().toISOString()};
+ const serialized=JSON.stringify(nextDB);
  htCloudHydrating=true;
- try{db=normalizeDB(record.data);db._meta={...(db._meta||{}),version:DB_VERSION,updatedAt:record.updatedAt||new Date().toISOString()};localStorage.setItem(DB_KEY,JSON.stringify(db));htCloudLastRemoteAt=record.updatedAt||'';refreshAll();htCloudStatus(label)}finally{htCloudHydrating=false}
+ try{localStorage.setItem(DB_KEY,serialized);db=nextDB;htCloudLastRemoteAt=record.updatedAt||'';refreshAll();htCloudStatus(label);return true}
+ finally{htCloudHydrating=false}
 }
 async function htCloudPush(){
  if(!htCloudReady||htCloudHydrating)return;
@@ -169,19 +183,30 @@ async function htCloudPush(){
 }
 function htCloudSchedulePush(){if(!htCloudReady||htCloudHydrating)return;clearTimeout(htCloudSaveTimer);htCloudSaveTimer=setTimeout(htCloudPush,700)}
 async function htCloudConnect(password){
+ htCloudReady=false;
  htCloudAuthHeader='Basic '+btoa(HT_SHARED_ADMIN_USER+':'+password);
  const result=await htCloudRequest('GET');
  if(result.record?.data){
   htCloudApply(result.record,'Đã tải dữ liệu ERP từ Netlify');
  }else{
-  // Do not seed an empty cloud workspace from a fresh browser before the owner imports the existing backup.
-  htCloudReady=true;
+  // Chỉ khởi tạo Cloud khi máy chủ xác nhận kho đang trống; dữ liệu cục bộ được giữ lại.
   const hasLocalData=DB_TABLES.some(k=>Array.isArray(db[k])&&db[k].length>0);
+  htCloudReady=true;
   if(hasLocalData){await htCloudPush();htCloudStatus('Đã khởi tạo kho dữ liệu ERP trên Netlify')}
-  else{htCloudStatus('Kho cloud đang trống · hãy khôi phục backup hiện có để khởi tạo dữ liệu chung')}
+  else{htCloudStatus('Kho Cloud đang trống · cần khôi phục backup để khởi tạo dữ liệu chung')}
  }
  htCloudReady=true;
- clearInterval(htCloudTimer);htCloudTimer=setInterval(async()=>{if(!htCloudReady||document.hidden)return;try{const latest=await htCloudRequest('GET');if(latest.record?.data&&latest.record.updatedAt!==htCloudLastRemoteAt){htCloudApply(latest.record,'Đã nhận cập nhật từ thiết bị khác · '+new Date().toLocaleTimeString('vi-VN'))}}catch(e){htCloudStatus('Mất kết nối đồng bộ · '+e.message)}},5000);
+ clearInterval(htCloudTimer);
+ let polling=false;
+ htCloudTimer=setInterval(async()=>{
+  if(!htCloudReady||document.hidden||polling)return;
+  polling=true;
+  try{
+   const latest=await htCloudRequest('GET');
+   if(latest.record?.data&&latest.record.updatedAt!==htCloudLastRemoteAt){htCloudApply(latest.record,'Đã nhận cập nhật từ thiết bị khác · '+new Date().toLocaleTimeString('vi-VN'))}
+  }catch(e){htCloudStatus('Mất kết nối đồng bộ · '+e.message)}
+  finally{polling=false}
+ },5000);
 }
 
 const $=id=>document.getElementById(id), money=n=>new Intl.NumberFormat('vi-VN',{style:'currency',currency:'VND',maximumFractionDigits:0}).format(Number(n)||0), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -266,16 +291,27 @@ function showApp(user,restoreForm=false){currentUser=user;$('loginScreen').style
 function manageOwnerLogin(){if(!currentUser?.isOwner){toast('Chỉ chủ sở hữu mới được điều chỉnh tài khoản đăng nhập.');return}changeOwnPassword()}
 async function login(){
  const loginName=$('loginUser').value.trim().toLowerCase(),password=$('loginPass').value;
- if(loginName!==HT_SHARED_ADMIN_USER||!password){toast('Vui lòng kiểm tra tên đăng nhập và mật khẩu.');return}
- const btn=$('loginButton');if(btn){btn.disabled=true;btn.textContent='Đang kết nối dữ liệu...'}
- try{await htCloudConnect(password);showApp({id:'shared-admin',name:'Admin',role:'Quản trị chung',isOwner:true,username:'admin',email:'admin@hieuthinh.local',authMode:'netlify',permissions:{}});$('authNotice').textContent='Đăng nhập admin thành công · Dữ liệu được đồng bộ qua Netlify.'}
- catch(e){console.error(e);htCloudReady=false;htCloudAuthHeader='';toast('Không thể đăng nhập/kết nối kho dữ liệu: '+e.message)}
- finally{if(btn){btn.disabled=false;btn.textContent='Đăng nhập'}}
+ const notice=$('authNotice');
+ if(loginName!==HT_SHARED_ADMIN_USER||!password){const msg='Vui lòng nhập đúng tài khoản admin và mật khẩu.';if(notice)notice.textContent=msg;toast(msg);return}
+ const btn=$('loginButton');
+ if(btn){btn.disabled=true;btn.textContent='Đang xác thực và tải dữ liệu...'}
+ if(notice)notice.textContent='Đang kết nối kho dữ liệu tập trung trên Netlify...';
+ try{
+  await htCloudConnect(password);
+  showApp({id:'shared-admin',name:'Admin',role:'Quản trị chung',isOwner:true,username:'admin',email:'admin@hieuthinh.local',authMode:'netlify',permissions:{}});
+  if(notice)notice.textContent='Đăng nhập thành công · Dữ liệu đang đồng bộ qua Netlify.';
+ }catch(e){
+  console.error('ERP login/cloud connection failed:',e);
+  htCloudReady=false;htCloudAuthHeader='';clearInterval(htCloudTimer);
+  const msg='Không thể đăng nhập hoặc kết nối dữ liệu: '+(e.message||'Lỗi không xác định');
+  if(notice)notice.textContent=msg;
+  toast(msg);
+ }finally{if(btn){btn.disabled=false;btn.textContent='Đăng nhập'}}
 }
 function resetPassword(){toast('Vui lòng liên hệ chủ sở hữu để được hỗ trợ mật khẩu dùng chung.')}
 function changeOwnPassword(){toast('Phiên bản đăng nhập cục bộ chưa hỗ trợ đổi mật khẩu.')}
 function logout(){htCloudReady=false;htCloudAuthHeader='';clearInterval(htCloudTimer);clearTimeout(htCloudSaveTimer);$('app').style.display='none';$('loginScreen').style.display='grid';$('loginPass').value='';currentUser=null;}
-async function restoreSession(){const notice=$('authNotice');if(notice)notice.textContent='Đăng nhập bằng tài khoản quản trị dùng chung. Dữ liệu được lưu tập trung trên Netlify.';}
+async function restoreSession(){const notice=$('authNotice');if(notice)notice.textContent='Đăng nhập bằng tài khoản admin dùng chung. Hệ thống xác thực và tải dữ liệu tập trung qua Netlify.';}
 
 function saveProfile(){currentUser.name=$('profileName').value.trim()||'Admin';currentUser.email=$('profileEmail').value.trim();localStorage.setItem('ht_name',currentUser.name);updateProfileUI();toast('Đã lưu hồ sơ cá nhân.')}
 function showSection(id,el){if(!guardPermission('view',id))return;const section=$(id);if(!section)return;document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));section.classList.add('active');document.querySelectorAll('.nav').forEach(n=>n.classList.remove('active'));const nav=el||document.querySelector(`[data-page=\"${id}\"]`);if(nav)nav.classList.add('active');document.querySelector('.sidebar')?.classList.remove('open');if(id==='tasks')renderCalendar();if(id==='share')renderShares();if(id==='audit')renderAudit();window.scrollTo({top:0,behavior:'smooth'})}
