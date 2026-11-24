@@ -1,57 +1,41 @@
 
 import { getStore } from '@netlify/blobs';
 
-const cors = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Cache-Control': 'no-store'
-};
+const json = (data, status = 200) =>
+  new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store'
+    }
+  });
 
-const response = (statusCode, body) => ({
-  statusCode,
-  headers: {
-    ...cors,
-    'Content-Type': 'application/json; charset=utf-8'
-  },
-  body: JSON.stringify(body)
-});
-
-function authorized(event) {
-  const h = event.headers?.authorization ||
-            event.headers?.Authorization || '';
-
-  if (!h.startsWith('Basic ')) return false;
+function isAuthorized(request) {
+  const header = request.headers.get('authorization') || '';
+  if (!header.startsWith('Basic ')) return false;
 
   try {
-    const [user, ...parts] = Buffer
-      .from(h.slice(6), 'base64')
-      .toString('utf8')
-      .split(':');
+    const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+    const separator = decoded.indexOf(':');
+    const username = decoded.slice(0, separator);
+    const password = decoded.slice(separator + 1);
+    const expected = process.env.ERP_ADMIN_PASSWORD;
 
-    const pass = parts.join(':');
-
-    return user === 'admin' &&
-      !!process.env.ERP_ADMIN_PASSWORD &&
-      pass === process.env.ERP_ADMIN_PASSWORD;
+    return username === 'admin' &&
+      !!expected &&
+      password === expected;
   } catch {
     return false;
   }
 }
 
-export default async (event) => {
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 204, headers: cors, body: '' };
+export default async (request) => {
+  if (!['GET', 'POST'].includes(request.method)) {
+    return json({ error: 'Method not allowed' }, 405);
   }
 
-  if (!['GET', 'POST'].includes(event.httpMethod)) {
-    return response(405, { error: 'Method not allowed' });
-  }
-
-  if (!authorized(event)) {
-    return response(401, {
-      error: 'Sai tài khoản hoặc mật khẩu ERP.'
-    });
+  if (!isAuthorized(request)) {
+    return json({ error: 'Sai tài khoản hoặc mật khẩu ERP.' }, 401);
   }
 
   try {
@@ -60,12 +44,12 @@ export default async (event) => {
       consistency: 'strong'
     });
 
-    if (event.httpMethod === 'GET') {
+    if (request.method === 'GET') {
       const record = await store.get('main', { type: 'json' });
-      return response(200, { ok: true, record: record || null });
+      return json({ ok: true, record: record || null });
     }
 
-    const payload = JSON.parse(event.body || '{}');
+    const payload = await request.json();
 
     if (
       !payload ||
@@ -73,9 +57,7 @@ export default async (event) => {
       !payload.data ||
       Array.isArray(payload.data)
     ) {
-      return response(400, {
-        error: 'Dữ liệu ERP không hợp lệ.'
-      });
+      return json({ error: 'Dữ liệu ERP không hợp lệ.' }, 400);
     }
 
     const current = await store.get('main', { type: 'json' });
@@ -83,16 +65,16 @@ export default async (event) => {
     const currentTime = Date.parse(current?.updatedAt || '') || 0;
 
     if (current && incomingTime < currentTime) {
-      return response(409, {
+      return json({
         ok: false,
         conflict: true,
         record: current,
-        error: 'Dữ liệu trên máy chủ mới hơn. Đã giữ nguyên dữ liệu máy chủ.'
-      });
+        error: 'Dữ liệu máy chủ mới hơn. Đã giữ nguyên dữ liệu máy chủ.'
+      }, 409);
     }
 
     if (current) {
-      const backupKey = `backup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const backupKey = `backup-${Date.now()}-${crypto.randomUUID()}`;
       await store.setJSON(backupKey, current);
     }
 
@@ -103,13 +85,12 @@ export default async (event) => {
     };
 
     await store.setJSON('main', record);
+    return json({ ok: true, record });
 
-    return response(200, { ok: true, record });
   } catch (error) {
     console.error('ERP data function error:', error);
-
-    return response(500, {
+    return json({
       error: 'Không thể truy cập kho dữ liệu Netlify.'
-    });
+    }, 500);
   }
 };
